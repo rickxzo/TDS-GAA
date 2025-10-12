@@ -72,7 +72,7 @@ Respond with ONLY the code, no explanations or markdown. If it's Python, start d
 Make the code print its output clearly."""
 
             # Call Claude API via AIPipe's OpenRouter endpoint
-            # Using Claude Sonnet via OpenRouter
+            # Using Claude Sonnet 3.5 via OpenRouter
             response = requests.post(
                 "https://aipipe.org/openrouter/v1/chat/completions",
                 headers={
@@ -80,7 +80,7 @@ Make the code print its output clearly."""
                     "Content-Type": "application/json"
                 },
                 json={
-                    "model": "anthropic/claude-sonnet-4-20250514",
+                    "model": "anthropic/claude-3.5-sonnet",
                     "messages": [{"role": "user", "content": prompt}]
                 },
                 timeout=60
