@@ -1,7 +1,8 @@
 """
 FastAPI app that integrates with CLI coding agents to auto-solve engineering tasks.
-Requires: fastapi, uvicorn, anthropic (for Claude API)
-Install: pip install fastapi uvicorn anthropic
+Uses AIPipe API (https://aipipe.org) for LLM access.
+Requires: fastapi, uvicorn, requests
+Install: pip install fastapi uvicorn requests
 Run: uvicorn main:app --host 0.0.0.0 --port 8000
 """
 
@@ -16,6 +17,7 @@ from typing import Optional
 import os
 import tempfile
 import shutil
+import requests
 
 # Configure logging
 logging.basicConfig(
@@ -47,22 +49,14 @@ class TaskResponse(BaseModel):
 
 async def run_claude_coding_agent(task: str) -> str:
     """
-    Use Claude API to act as a coding agent that can write and execute code.
-    This simulates a CLI coding agent by having Claude write code and return results.
+    Use Claude API via AIPipe to act as a coding agent that can write and execute code.
+    AIPipe provides access to OpenRouter/OpenAI models without needing individual API keys.
     """
     try:
-        # Import anthropic for Claude API
-        try:
-            import anthropic
-        except ImportError:
-            return "Error: anthropic package not installed. Run: pip install anthropic"
-        
-        # Get API key from environment
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
-        if not api_key:
-            return "Error: ANTHROPIC_API_KEY environment variable not set"
-        
-        client = anthropic.Anthropic(api_key=api_key)
+        # Get AIPipe token from environment
+        aipipe_token = os.environ.get("AIPIPE_TOKEN")
+        if not aipipe_token:
+            return "Error: AIPIPE_TOKEN environment variable not set. Get one from https://aipipe.org/login"
         
         # Create a temporary workspace
         workspace = tempfile.mkdtemp(prefix="agent_workspace_")
@@ -77,21 +71,48 @@ Please write the complete code needed to solve this task. The code should be pro
 Respond with ONLY the code, no explanations or markdown. If it's Python, start directly with the code.
 Make the code print its output clearly."""
 
-            message = client.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=2000,
-                messages=[{"role": "user", "content": prompt}]
+            # Call Claude API via AIPipe's OpenRouter endpoint
+            # Using Claude Sonnet via OpenRouter
+            response = requests.post(
+                "https://aipipe.org/openrouter/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {aipipe_token}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": "anthropic/claude-sonnet-4-20250514",
+                    "messages": [{"role": "user", "content": prompt}]
+                },
+                timeout=60
             )
             
-            code = message.content[0].text.strip()
+            if response.status_code != 200:
+                return f"Error: API request failed with status {response.status_code}: {response.text}"
+            
+            data = response.json()
+            
+            # Extract the generated code from the response
+            if "choices" in data and len(data["choices"]) > 0:
+                code = data["choices"][0]["message"]["content"].strip()
+            else:
+                return f"Error: Unexpected API response format: {data}"
+            
             logger.info(f"Generated code:\n{code}")
             
+            # Clean up any markdown code blocks
+            if code.startswith("```python"):
+                code = code.replace("```python", "").replace("```", "").strip()
+            elif code.startswith("```"):
+                code = code.replace("```", "").strip()
+            
             # Detect language and save file
-            if "def " in code or "import " in code or "print(" in code:
+            if "def " in code or "import " in code or "print(" in code or "print " in code:
                 # Python code
                 code_file = os.path.join(workspace, "solution.py")
                 with open(code_file, "w") as f:
                     f.write(code)
+                
+                logger.info(f"Saved code to: {code_file}")
                 
                 # Execute the code
                 process = await asyncio.create_subprocess_exec(
@@ -105,11 +126,11 @@ Make the code print its output clearly."""
                 output = stdout.decode() if stdout else ""
                 error = stderr.decode() if stderr else ""
                 
-                result = f"Code executed successfully.\n\nOutput:\n{output}"
+                result = f"Agent created and executed: solution.py\n\nCode:\n{code}\n\nOutput:\n{output}"
                 if error:
-                    result += f"\n\nErrors/Warnings:\n{error}"
+                    result += f"\n\nStderr:\n{error}"
                 
-                logger.info(f"Execution result: {result}")
+                logger.info(f"Execution completed successfully")
                 return result
             else:
                 return f"Generated code (language detection inconclusive):\n\n{code}\n\nNote: Automatic execution skipped."
@@ -119,6 +140,10 @@ Make the code print its output clearly."""
             shutil.rmtree(workspace, ignore_errors=True)
             logger.info(f"Cleaned up workspace: {workspace}")
             
+    except requests.exceptions.Timeout:
+        error_msg = "Error: API request timed out after 60 seconds"
+        logger.error(error_msg)
+        return error_msg
     except Exception as e:
         error_msg = f"Error running coding agent: {str(e)}"
         logger.error(error_msg)
@@ -127,7 +152,7 @@ Make the code print its output clearly."""
 async def run_simple_coding_agent(task: str) -> str:
     """
     Fallback: A simple agent that handles specific known tasks directly.
-    This is used when Claude API is not available.
+    This is used when AIPipe token is not available.
     """
     logger.info(f"Using fallback simple agent for task: {task}")
     
@@ -175,7 +200,7 @@ print(f"The 99th triangular number (sum of 1 through 99) is: {triangular_number}
             shutil.rmtree(workspace, ignore_errors=True)
     
     # For other tasks, return a template response
-    return f"Task received: {task}\n\nAgent would execute this task in a real deployment.\nPlease configure ANTHROPIC_API_KEY environment variable for full functionality."
+    return f"Task received: {task}\n\nAgent would execute this task in a real deployment.\nPlease configure AIPIPE_TOKEN environment variable for full functionality.\nGet your token at: https://aipipe.org/login"
 
 @app.get("/task", response_model=TaskResponse)
 async def handle_task(q: str = Query(..., description="Task description for the coding agent")):
@@ -188,10 +213,10 @@ async def handle_task(q: str = Query(..., description="Task description for the 
     
     start_time = datetime.now()
     
-    # Try to use Claude API agent first, fallback to simple agent
-    if os.environ.get("ANTHROPIC_API_KEY"):
+    # Try to use AIPipe agent first, fallback to simple agent
+    if os.environ.get("AIPIPE_TOKEN"):
         output = await run_claude_coding_agent(q)
-        agent_name = "claude-api-agent"
+        agent_name = "aipipe-claude-agent"
     else:
         output = await run_simple_coding_agent(q)
         agent_name = "simple-agent"
@@ -226,7 +251,8 @@ async def root():
         "endpoints": {
             "task": "/task?q=<task_description>",
             "docs": "/docs"
-        }
+        },
+        "powered_by": "AIPipe (https://aipipe.org)"
     }
 
 @app.get("/health")
